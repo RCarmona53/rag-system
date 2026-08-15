@@ -93,3 +93,27 @@ Definiciones de los conceptos vistos en este proyecto, para repasar antes de una
 **Regression testing (de calidad)** — volver a correr el dataset de evaluación después de un cambio (nuevo prompt, nuevo modelo, nuevo chunking) para confirmar que la calidad no empeoró — el equivalente de un test suite, pero para comportamiento de IA en vez de lógica determinística.
 
 **Concurrency / max_workers** — cuántas llamadas en paralelo se hacen durante una evaluación (o cualquier proceso batch). Más concurrencia es más rápido, pero puede saturar al proveedor y generar timeouts que no tienen nada que ver con el contenido de las llamadas — lo vivimos al bajar `max_workers` de 16 a 3 y ver desaparecer los `TimeoutError`.
+
+## Agentes y tool-calling (Proyecto 2)
+
+**Agente (agent)** — un sistema donde el LLM no solo genera texto, sino que **decide** qué acción tomar a continuación (llamar una tool, seguir razonando, o responder) en base al estado de la conversación, en vez de seguir un flujo fijo de pasos hardcodeados como `/query`.
+
+**Tool calling / function calling** — la capacidad de un LLM de, en vez de responder texto libre, devolver una estructura (`tool_calls`) indicando qué función quiere ejecutar y con qué argumentos. El modelo nunca ejecuta la función: solo pide que la ejecutemos y le devolvamos el resultado.
+
+**ReAct (Reasoning + Acting)** — el patrón de loop de un agente: el modelo razona, decide llamar una tool, recibe el resultado, y vuelve a razonar con esa información hasta tener una respuesta final. Es el loop que implementa `app/agent.py` con un `StateGraph` armado a mano en vez de una función prebuilt, justamente para poder explicar cada paso.
+
+**LangGraph** — framework (de los mismos creadores de LangChain) para armar agentes como grafos explícitos de estados y nodos, con soporte nativo para loops, condicionales y persistencia de estado (`checkpointing`). Se eligió sobre encadenar `Runnable`s de LCEL porque un agente con loop de tools no es una cadena lineal.
+
+**StateGraph** — la clase de LangGraph que define un agente como un grafo: nodos (funciones que reciben y devuelven estado), edges (conexiones entre nodos) y edges condicionales (deciden el próximo nodo según el estado actual). En este proyecto: nodo `agent` → `ToolNode` → edge condicional que decide si seguir, terminar, o cortar por límite de pasos.
+
+**ToolNode** — nodo prebuilt de LangGraph que ejecuta automáticamente las tools que el LLM pidió llamar (parseando `tool_calls`) y devuelve los resultados como `ToolMessage`s, sin tener que escribir ese despacho a mano.
+
+**AST whitelist (evaluador seguro)** — en vez de usar `eval()` (ejecución de código arbitraria, inaceptable si el string lo controla un LLM), se parsea la expresión a un árbol de sintaxis (`ast.parse`) y solo se evalúan a mano los tipos de nodo permitidos explícitamente (literales numéricos y operadores aritméticos) — cualquier otro nodo (nombres, atributos, llamadas) se rechaza. Es el patrón que usa `calculator` en `app/agent.py`.
+
+**Checkpointing / thread_id** — mecanismo de LangGraph para persistir el estado de una conversación (los mensajes acumulados) entre requests, identificado por un `thread_id`. Sin esto, cada llamada a un agente empezaría de cero sin memoria de turnos anteriores. En este proyecto se persiste en el mismo Postgres que `pgvector`, con `PostgresSaver`.
+
+**Recursion limit / iteration cap** — límite a la cantidad de vueltas que puede dar el loop de un agente antes de forzar un corte. Sin esto, un agente puede quedar llamando tools indefinidamente (por un prompt ambiguo, una tool que nunca "cierra" la pregunta, etc.). En este proyecto hay dos capas: un contador de dominio (`MAX_STEPS`) y un backstop técnico de LangGraph (`recursion_limit`).
+
+**Tracing / span (observabilidad de agentes)** — un *trace* es el registro completo de una ejecución del agente (todos los nodos y tools que corrieron, en orden); un *span* es cada paso individual dentro de ese trace, con su input, output, latencia y costo. Sin esto, depurar por qué un agente llamó (o no llamó) una tool es casi imposible — hay que confiar en logs sueltos en vez de ver el loop completo.
+
+**LangSmith** — plataforma de observabilidad de LangChain/LangGraph: captura traces y spans automáticamente cuando está configurada (variable de entorno `LANGSMITH_API_KEY`). Se diseñó para que sea un *no-op* real cuando la key no está — ni un objeto de tracer se construye, cero llamadas de red — para que el agente funcione igual sin depender de una cuenta.
